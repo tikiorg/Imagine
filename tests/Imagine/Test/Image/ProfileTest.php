@@ -30,7 +30,7 @@ class ProfileTest extends ImagineTestCase
 
     public function testFromPath()
     {
-        $file = __DIR__ . '/../../../../lib/Imagine/resources/Adobe/CMYK/JapanColor2001Uncoated.icc';
+        $file = __DIR__ . '/../../../../lib/Imagine/resources/colormanagement.org/ISOcoated_v2_grey1c_bas.ICC';
         $profile = Profile::fromPath($file);
 
         $this->assertEquals(basename($file), $profile->name());

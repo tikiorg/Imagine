@@ -110,7 +110,7 @@ class CMYK implements PaletteInterface
     public function profile()
     {
         if (!$this->profile) {
-            $this->profile = Profile::fromPath(__DIR__ . '/../../resources/Adobe/CMYK/USWebUncoated.icc');
+            $this->profile = Profile::fromPath(__DIR__ . '/../../resources/colormanagement.org/ISOcoated_v2_grey1c_bas.ICC');
         }
 
         return $this->profile;
