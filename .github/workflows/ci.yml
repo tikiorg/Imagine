@@ -1,0 +1,186 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+jobs:
+  # Build and dependency installation
+  composer:
+    name: Install Dependencies
+    runs-on: ubuntu-latest
+    container:
+      image: tikiwiki/tikiwiki-ci:8.1-qa
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.composercache
+          key: cache-imagine
+
+      - name: Install Composer dependencies
+        run: |
+          composer -V | grep "version 2" || composer self-update --2
+          composer install --prefer-dist --no-progress
+
+      - name: Upload vendor directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor
+          path: vendor/
+          retention-days: 1
+
+  # Unit tests across multiple PHP versions
+  unit-tests:
+    name: Unit Tests (PHP ${{ matrix.php-version }})
+    runs-on: ubuntu-latest
+    needs: composer
+    strategy:
+      matrix:
+        php-version: ["8.1", "8.2", "8.3", "8.4"]
+    container:
+      image: tikiwiki/tikiwiki-ci:${{ matrix.php-version }}-qa
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download vendor directory
+        uses: actions/download-artifact@v4
+        with:
+          name: vendor
+          path: vendor/
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.composercache
+          key: cache-imagine
+
+      - name: Setup ImageMagick and PHP extensions
+        run: |
+          apt-get update --allow-releaseinfo-change
+          add-apt-repository -y ppa:ondrej/php
+          apt-get update
+          apt-get install -y imagemagick
+          apt-get install -y php${{ matrix.php-version }}-imagick 
+          echo "Enabling ImageMagick to read/write PDFs"
+          if [ -f /etc/ImageMagick-6/policy.xml ]; then
+            sed -i -e 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/' /etc/ImageMagick-6/policy.xml
+            sed -i -e 's/<policy domain="coder" rights="none" pattern="EPS" \/>/<policy domain="coder" rights="read|write" pattern="EPS" \/>/' /etc/ImageMagick-6/policy.xml
+          fi
+
+      - name: Configure Git for Composer
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          git config --global --add safe.directory '*'
+
+      - name: Update and install Composer dependencies
+        run: |
+          composer update --ansi --no-progress --prefer-dist -n
+          composer install --ansi --no-progress --prefer-dist -n
+
+      - name: Run PHPUnit tests
+        run: |
+          php -d display_errors=On bin/phpunit --colors=always --log-junit report.xml --display-deprecations --display-notices --display-warnings
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-php${{ matrix.php-version }}
+          path: report.xml
+          retention-days: 1
+
+  # Package creation (matches GitLab CI compressed job)
+  compressed:
+    name: Create Compressed Package
+    runs-on: ubuntu-latest
+    needs: [composer]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    container:
+      image: tikiwiki/tikiwiki-ci:8.1-qa
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create compressed package
+        run: |
+          PACK_FILES_FOLDERS_LIST="lib composer.json README.md LICENSE"
+          tar czvf imagine.tgz ${PACK_FILES_FOLDERS_LIST}
+
+      - name: Upload compressed package
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagine-compressed
+          path: imagine.tgz
+          retention-days: 30
+
+  # Package upload
+  upload:
+    name: Upload Package
+    runs-on: ubuntu-latest
+    needs: [compressed]
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    container:
+      image: curlimages/curl:latest
+    steps:
+      - name: Download compressed package
+        uses: actions/download-artifact@v4
+        with:
+          name: imagine-compressed
+          path: .
+
+      - name: Upload to GitHub Package Registry
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "Uploading package for tag: $TAG_NAME"
+          # Upload to GitHub Package Registry
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -F "package_file=@imagine.tgz" \
+            "https://api.github.com/repos/${{ github.repository }}/packages/generic/imagine/$TAG_NAME/imagine.tgz"
+
+  # Release creation for tags
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [upload]
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    container:
+      image: tikiwiki/tikiwiki-ci:8.1-qa
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download compressed package
+        uses: actions/download-artifact@v4
+        with:
+          name: imagine-compressed
+          path: .
+
+      - name: Extract tag name
+        id: tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+          name: Release ${{ steps.tag.outputs.TAG_NAME }}
+          body: |
+            Release of ${{ steps.tag.outputs.TAG_NAME }}
+
+            **Package Download:**
+            - [imagine.tgz](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG_NAME }}/imagine.tgz)
+          files: imagine.tgz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
